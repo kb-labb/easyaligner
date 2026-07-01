@@ -431,7 +431,7 @@ def run_vad_pipeline(metadata: AudioMetadata, model, audio, sample_rate=16000, c
         # Run VAD on entire audio
         vad_segments = model(
             {
-                "waveform": torch.tensor(audio).unsqueeze(0).to(torch.float32),
+                "waveform": torch.as_tensor(audio).unsqueeze(0).to(torch.float32),
                 "sample_rate": sample_rate,
             }
         )
@@ -455,7 +455,7 @@ def run_vad_pipeline(metadata: AudioMetadata, model, audio, sample_rate=16000, c
 
             vad_segments = model(
                 {
-                    "waveform": torch.tensor(speech_audio).unsqueeze(0).to(torch.float32),
+                    "waveform": torch.as_tensor(speech_audio).unsqueeze(0).to(torch.float32),
                     "sample_rate": sample_rate,
                 }
             )
