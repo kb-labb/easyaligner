@@ -13,7 +13,7 @@ from pyannote.core import Annotation, Segment, SlidingWindowFeature
 from tqdm import tqdm
 
 from easyaligner.data.datamodel import AudioMetadata, SpeechSegment
-from easyaligner.vad.utils import encode_vad_segments
+from easyaligner.vad.utils import drop_empty_speeches, encode_vad_segments
 
 """
 This file contains modified functions from WhisperX (BSD-4-Clause License).
@@ -439,12 +439,15 @@ def run_vad_pipeline(metadata: AudioMetadata, model, audio, sample_rate=16000, c
         vad_segments = merge_chunks(vad_segments, chunk_size=chunk_size)
         segments = encode_vad_segments(vad_segments)
 
+        # Create a single SpeechSegment based on where speech was detected.
+        # An empty `speeches` list signals a file with no detected speech.
         metadata.speeches = []
-        metadata.speeches.append(
-            SpeechSegment(
-                start=segments[0].start, end=segments[-1].end, text=None, chunks=segments
+        if segments:
+            metadata.speeches.append(
+                SpeechSegment(
+                    start=segments[0].start, end=segments[-1].end, text=None, chunks=segments
+                )
             )
-        )
     else:
         # Run VAD on each speech segment
         for speech in tqdm(metadata.speeches, desc="Running VAD on speeches"):
@@ -472,11 +475,11 @@ def run_vad_pipeline(metadata: AudioMetadata, model, audio, sample_rate=16000, c
             ]
             segments = encode_vad_segments(vad_segments)
 
-            if speech.duration is None:
+            if speech.duration is None and segments:
                 speech.start = segments[0].start
                 speech.end = segments[-1].end
                 speech.calculate_duration()
 
             speech.chunks = segments  # In place update of chunks in metadata
 
-    return metadata
+    return drop_empty_speeches(metadata)

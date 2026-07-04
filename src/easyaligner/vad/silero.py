@@ -3,7 +3,7 @@ from silero_vad import get_speech_timestamps, load_silero_vad
 from tqdm import tqdm
 
 from easyaligner.data.datamodel import AudioMetadata, SpeechSegment
-from easyaligner.vad.utils import encode_vad_segments
+from easyaligner.vad.utils import drop_empty_speeches, encode_vad_segments
 
 
 def load_vad_model(onnx=False, opset_version=16):
@@ -42,6 +42,9 @@ def merge_chunks(segments, chunk_size=30):
         List of merged chunks, where each chunk is a dictionary with
         "start", "end", and "segments" keys.
     """
+    if not segments:
+        return []
+
     current_start = segments[0]["start"]
     current_end = segments[0]["end"]
     merged_segments = []
@@ -103,17 +106,22 @@ def run_vad_pipeline(
         vad_segments = merge_chunks(vad_segments, chunk_size=chunk_size)
         segments = encode_vad_segments(vad_segments)
 
-        # Create a single SpeechSegment based on where speech was detected
+        # Create a single SpeechSegment based on where speech was detected.
+        # An empty `speeches` list signals a file with no detected speech.
         metadata.speeches = []
-        metadata.speeches.append(
-            SpeechSegment(
-                start=segments[0].start, end=segments[-1].end, text=None, chunks=segments
+        if segments:
+            metadata.speeches.append(
+                SpeechSegment(
+                    start=segments[0].start, end=segments[-1].end, text=None, chunks=segments
+                )
             )
-        )
     else:
         # Run VAD on each speech segment
         for speech in tqdm(metadata.speeches, desc="Running VAD on speeches"):
-            speech_audio = audio[int(speech.start * sample_rate) : int(speech.end * sample_rate)]
+            start = int(speech.start * sample_rate) if speech.start is not None else None
+            end = int(speech.end * sample_rate) if speech.end is not None else None
+            # Note: Using `None` as a slicing parameter is the same as omitting it
+            speech_audio = audio[start:end]
             vad_segments = get_speech_timestamps(
                 speech_audio,
                 model,
@@ -122,15 +130,22 @@ def run_vad_pipeline(
             )
             vad_segments = merge_chunks(vad_segments, chunk_size=chunk_size)
             # Add speech.start offset to each segment
+            offset = speech.start if speech.start is not None else 0
             vad_segments = [
                 {
-                    "start": seg["start"] + speech.start,
-                    "end": seg["end"] + speech.start,
+                    "start": seg["start"] + offset,
+                    "end": seg["end"] + offset,
                     "segments": seg["segments"],
                 }
                 for seg in vad_segments
             ]
             segments = encode_vad_segments(vad_segments)
+
+            if speech.duration is None and segments:
+                speech.start = segments[0].start
+                speech.end = segments[-1].end
+                speech.calculate_duration()
+
             speech.chunks = segments
 
-    return metadata
+    return drop_empty_speeches(metadata)

@@ -231,6 +231,11 @@ def segment_speech_probs(probs_list: list[np.ndarray], speech_ids: list[str] | l
     np.ndarray
         Probabilities for the speech segment.
     """
+    # Nothing to segment (e.g. a file where VAD detected no speech). Yield nothing
+    # so callers iterate over an empty result instead of hitting np.concatenate([]).
+    if not probs_list:
+        return
+
     # Count the number of chunks per speech id
     speech_chunk_counts = [
         (key, sum(1 for i in group)) for key, group in itertools.groupby(speech_ids)

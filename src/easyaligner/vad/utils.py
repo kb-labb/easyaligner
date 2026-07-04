@@ -124,6 +124,35 @@ def seconds_to_frames(seconds, sr=16000):
     return int(seconds * sr)
 
 
+def drop_empty_speeches(metadata: AudioMetadata) -> AudioMetadata:
+    """
+    Remove speeches where VAD detected no speech (i.e. speeches without chunks).
+
+    Downstream pipeline stages (emissions extraction, alignment) assume every
+    speech has at least one VAD chunk. An empty `speeches` list signals a file
+    with no detected speech.
+
+    Parameters
+    ----------
+    metadata : AudioMetadata
+        The metadata object to filter after running VAD.
+
+    Returns
+    -------
+    AudioMetadata
+        The metadata object with chunkless speeches removed.
+    """
+    speeches = [speech for speech in metadata.speeches if speech.chunks]
+    num_dropped = len(metadata.speeches) - len(speeches)
+    if num_dropped > 0:
+        logger.warning(
+            f"VAD detected no speech in {num_dropped} speech segment(s) of "
+            f"{metadata.audio_path}. Dropping them from the metadata."
+        )
+    metadata.speeches = speeches
+    return metadata
+
+
 def encode_vad_segments(vad_segments):
     """
     Encode VAD segments into a list of AudioChunk objects.
