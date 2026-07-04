@@ -144,24 +144,28 @@ def read_audio_segment(
     start_sec: float,
     duration_sec: float,
     sample_rate: int = 16000,
+    timeout_sec: float = 180.0,
 ) -> np.ndarray:
     """
     Read a segment of audio using ffmpeg subprocess with seek.
 
     Uses ffmpeg's fast seek (-ss before -i) to efficiently read only the
-    required segment, with resampling to the target sample rate and mono conversion.
+    required segment, with resampling to the target sample rate and mono
+    conversion.
 
     Args:
         audio_path: Path to the audio file.
         start_sec: Start time in seconds.
         duration_sec: Duration to read in seconds.
         sample_rate: Target sample rate for resampling.
+        timeout_sec: Max seconds to wait for ffmpeg before raising.
 
     Returns:
         Audio data as float32 numpy array.
     """
     cmd = [
         "ffmpeg",
+        "-nostdin",  # Disable interactive mode; never read from stdin/tty
         "-ss",
         str(start_sec),  # Seek to position (before -i = fast seek)
         "-i",
@@ -178,11 +182,22 @@ def read_audio_segment(
         "error",
         "pipe:1",  # Output to stdout
     ]
-
     try:
-        proc = subprocess.run(cmd, capture_output=True, check=True)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            check=True,
+            stdin=subprocess.DEVNULL,  # Don't inherit the parent's tty
+            timeout=timeout_sec,  # Don't let a stuck read hang the worker
+        )
         audio = np.frombuffer(proc.stdout, dtype=np.float32)
         return audio
+    except subprocess.TimeoutExpired:
+        logger.error(
+            f"ffmpeg timed out after {timeout_sec}s reading {audio_path} "
+            f"(start={start_sec}, duration={duration_sec})"
+        )
+        raise
     except subprocess.CalledProcessError as e:
         logger.error(f"ffmpeg error reading {audio_path}: {e.stderr.decode()}")
         raise
