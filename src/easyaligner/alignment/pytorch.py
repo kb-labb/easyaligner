@@ -160,20 +160,34 @@ def align_chunks(
         for i, chunk in enumerate(speech.chunks):
             chunk.id = f"{speech_id}-{i}"
             normalized_tokens, mapping = text_normalizer_fn(chunk.text)
+            normalized_tokens = apply_tokenizer_case(mapping, tokenizer_case)
             emissions_chunk = emissions[i]
             emissions_chunk = emissions_chunk[: chunk.num_logits]
 
-            # Check CTC constraint before alignment
+            # Check CTC constraint and target/character count consistency before alignment
             can_align, T, L, R = is_alignable(
                 normalized_tokens, processor, emissions_chunk.shape[0], tokenizer_case
             )
+            num_targets, num_chars = count_alignment_targets(
+                normalized_tokens, processor, tokenizer_case, word_boundary
+            )
 
-            if not can_align:
+            if not can_align or num_targets != num_chars:
+                if not can_align:
+                    reason = (
+                        f"emission_frames (T={T}) < target_length (L={L}) + repeats (R={R})."
+                        f"\n\n (Whisper probably hallucinated a too long text)."
+                    )
+                else:
+                    reason = (
+                        f"Tokenizer produced {num_targets} alignment targets for "
+                        f"{num_chars} normalized characters (text likely contains "
+                        f"characters the emissions model cannot align)."
+                    )
                 logger.warning(
                     f"Alignment infeasible for chunk {i} in file: {metadata.audio_path}, "
                     f"starting at: {chunk.start} and ending at: {chunk.end}.\n\n"
-                    f"emission_frames (T={T}) < target_length (L={L}) + repeats (R={R})."
-                    f"\n\n (Whisper probably hallucinated a too long text).\n\n"
+                    f"{reason}\n\n"
                     f"Using fallback linear interpolation for timestamps.\n\n"
                 )
                 alignment_mapping = process_fallback_alignment(
@@ -277,20 +291,34 @@ def align_speech(
             continue
 
         normalized_tokens, mapping = text_normalizer_fn(original_text)
+        normalized_tokens = apply_tokenizer_case(mapping, tokenizer_case)
 
-        # Check CTC constraint before alignment
+        # Check CTC constraint and target/character count consistency before alignment
         can_align, T, L, R = is_alignable(
             normalized_tokens, processor, emissions.shape[0], tokenizer_case
         )
+        num_targets, num_chars = count_alignment_targets(
+            normalized_tokens, processor, tokenizer_case, word_boundary
+        )
 
-        if not can_align:
+        if not can_align or num_targets != num_chars:
+            if not can_align:
+                reason = (
+                    f"emission_frames (T={T}) < target_length (L={L}) + repeats (R={R})."
+                    f"\n\n (Text is probably too long for the given audio)."
+                )
+            else:
+                reason = (
+                    f"Tokenizer produced {num_targets} alignment targets for "
+                    f"{num_chars} normalized characters (text likely contains "
+                    f"characters the emissions model cannot align)."
+                )
             logger.warning(
                 (
                     f"Alignment infeasible for speech {speech.speech_id} in file: "
                     f"{metadata.audio_path}, starting at: {speech.start} and ending at: "
                     f"{speech.end}.\n\n"
-                    f"emission_frames (T={T}) < target_length (L={L}) + repeats (R={R})."
-                    f"\n\n (Text is probably too long for the given audio).\n\n"
+                    f"{reason}\n\n"
                     f"Using fallback linear interpolation for timestamps.\n\n"
                 )
             )
@@ -364,6 +392,41 @@ def align_speech(
             Path(emissions_filepath).unlink()
 
     return speech_mappings
+
+
+def apply_tokenizer_case(mapping: list[dict], case: str) -> list[str]:
+    """
+    Case-convert the normalized tokens in the mapping to match the tokenizer's casing.
+
+    The conversion must be applied to the tokens themselves, not only to the
+    assembled transcript inside `align_pytorch`: some characters change length
+    when cased (e.g. "ß".upper() == "SS"), and `unflatten` segments the aligned
+    token spans using the character lengths of the normalized tokens. Casing
+    only the transcript would make the alignment targets longer than the
+    normalized tokens, causing a length mismatch.
+
+    Parameters
+    ----------
+    mapping : list of dict
+        Token mapping from the text normalizer. The "normalized_token" entries
+        are updated in place.
+    case : str
+        Case of the tokenizer vocabulary. One of "upper", "lower", or "mixed".
+
+    Returns
+    -------
+    list of str
+        The case-converted normalized tokens.
+    """
+    convert = {"upper": str.upper, "lower": str.lower}.get(case)
+
+    normalized_tokens = []
+    for entry in mapping:
+        if convert is not None:
+            entry["normalized_token"] = convert(entry["normalized_token"])
+        normalized_tokens.append(entry["normalized_token"])
+
+    return normalized_tokens
 
 
 def _get_processor_case(processor: Wav2Vec2Processor) -> str:
@@ -455,6 +518,63 @@ def is_alignable(
     L = targets.size(1)
     R = count_target_repeats(targets)
     return (T >= L + R, T, L, R)
+
+
+def count_alignment_targets(
+    normalized_tokens: list[str],
+    processor: Wav2Vec2Processor,
+    case: str = "upper",
+    word_boundary: str | None = "|",
+) -> tuple[int, int]:
+    """
+    Count the non-word-boundary alignment targets the tokenizer produces for the
+    normalized tokens, along with the total character length of those tokens.
+
+    Forced alignment emits exactly one token span per alignment target, and
+    `unflatten` divides the spans (after word boundary removal) according to the
+    character lengths of the normalized tokens. The two counts must therefore be
+    equal for word span segmentation to be possible.
+
+    The counts can differ when a character expands under case conversion (e.g.
+    "ß".upper() == "SS", and some Greek letters behave similarly), since the
+    transcript is case-converted to match the tokenizer vocabulary before
+    tokenization. `apply_tokenizer_case` guards against this by case-converting
+    the normalized tokens themselves ahead of alignment. The counts can also
+    differ if the tokenizer drops characters it cannot encode.
+
+    Parameters
+    ----------
+    normalized_tokens : list of str
+        List of normalized text tokens (already case-converted to match the
+        tokenizer, see `apply_tokenizer_case`).
+    processor : Wav2Vec2Processor
+        Wav2Vec2Processor instance for tokenization.
+    case : str, default "upper"
+        Case of the character tokens in the tokenizer.
+    word_boundary : str, optional
+        Token indicating word boundaries in the tokenizer.
+
+    Returns
+    -------
+    tuple
+        Tuple of (num_targets, num_chars).
+    """
+    transcript = " ".join(normalized_tokens).replace("\n", " ")
+
+    if case == "upper":
+        transcript = transcript.upper()
+    elif case == "lower":
+        transcript = transcript.lower()
+
+    targets = processor.tokenizer(transcript, return_tensors="pt")["input_ids"]
+    num_targets = targets.numel()
+
+    if word_boundary is not None:
+        word_boundary_id = processor.tokenizer.convert_tokens_to_ids(word_boundary)
+        num_targets -= int((targets == word_boundary_id).sum().item())
+
+    num_chars = sum(len(token) for token in normalized_tokens)
+    return num_targets, num_chars
 
 
 def create_fallback_alignment(
